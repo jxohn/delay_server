@@ -9,6 +9,8 @@ import (
 type DelayMessage struct {
 	DelayTime time.Time
 	Msg       sarama.ProducerMessage // kafka消息
+
+	Brokers []string
 }
 
 type MessageOffset struct {

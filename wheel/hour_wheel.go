@@ -17,6 +17,11 @@ const (
 	NextHourBit  = 0b0
 )
 
+const (
+	Locked = iota + 1
+	UnLocked
+)
+
 type HourWheel struct {
 	sync.RWMutex
 
@@ -29,11 +34,15 @@ type HourWheel struct {
 
 	mWheels []*SecondWheel
 
-	notifyChan chan model.MessageOffset // 通知加载数据, 小时级别数据
+	notifyChan chan model.MessageOffset // 通知加载数据, 小时级别数据, 处理时需要加锁, 防止同时从文件和内存写入
 	offsetChan chan model.MessageOffset // 更新消费offset
+
+	loaderLock sync.RWMutex // loader锁
 
 	processor Processor
 }
+
+type LockEvent int32
 
 // NewHourWheel 新建一个时间轮
 // @param notifyChan: 小时级别通知, 加在数据; offsetChan : 秒级别的通知, 更新处理索引位置
@@ -50,6 +59,13 @@ func NewHourWheel(nc chan model.MessageOffset, oc chan model.MessageOffset, p Pr
 		offsetChan:   oc,
 		processor:    p,
 	}
+}
+
+// Start 开始处理
+func (h *HourWheel) Start() {
+	go h.listen()
+
+	h.BeginLoop()
 }
 
 func (h *HourWheel) BeginLoop() {
@@ -117,7 +133,13 @@ func (h *HourWheel) Put(message model.DelayMessage) error {
 	cursorIndex := hour ^ int(*h.cursor)
 	waterIndex := h.GetIndexFromTime(message.DelayTime)
 
+	// todo 如果cursor在next, 需要判断next是否被file loader锁住, 如果锁住, 则放入等待队列...
 	index := (cursorIndex<<12 + int(waterIndex)) & WheelsLength
+	// 下一小时
+	if (hour & int(*h.cursor)) == 1 {
+		h.loaderLock.RLock()
+		defer h.loaderLock.RUnlock()
+	}
 
 	// 2. 放入计算位置bucket
 	h.mWheels[index].Put(message)
@@ -129,4 +151,17 @@ func (h *HourWheel) GetIndexFromTime(now time.Time) uint64 {
 	minute := now.Minute()
 	second := now.Second()
 	return uint64((minute<<6)&MinuteBit+second&SecondBit) & WheelsLength
+}
+
+func (h *HourWheel) listen() {
+	for {
+		mo := <-h.notifyChan
+		// 1. 加锁
+		h.loaderLock.Lock()
+		// 2. 加载数据
+		// todo loader
+		mo.Index
+		// 3. 释放锁
+		h.loaderLock.Unlock()
+	}
 }
